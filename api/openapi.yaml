@@ -1,0 +1,627 @@
+openapi: "3.1.0"
+
+info:
+  title: Artifact Registry Service
+  version: "0.1.0"
+  description: |
+    General-purpose artifact distribution for internal services and edge devices.
+    Artifacts are immutable once uploaded. Channels (stable, canary, …) are
+    mutable pointers to a specific version and support single-step rollback.
+
+servers:
+  - url: "{baseURL}/v1"
+    variables:
+      baseURL:
+        default: "http://localhost:8080"
+        description: Resolved from BASE_URL env var at startup.
+
+# ── Security ──────────────────────────────────────────────────────────────────
+security:
+  - BearerAuth: []   # applied globally; overridden to [] on /health
+
+components:
+  securitySchemes:
+    BearerAuth:
+      type: http
+      scheme: bearer
+      description: |
+        API key passed as `Authorization: Bearer <key>`.
+
+        Three additive scopes, configured via env vars:
+        - **read**  — GET artifact and channel endpoints (ARS_READ_KEYS)
+        - **write** — upload artifacts; implies read (ARS_WRITE_KEYS)
+        - **admin** — promote and rollback; implies write + read (ARS_ADMIN_KEYS)
+
+        Set `ARS_AUTH_DISABLED=true` to bypass enforcement in dev mode.
+
+  schemas:
+    # ── Domain objects ────────────────────────────────────────────────────────
+    Artifact:
+      type: object
+      required:
+        - id
+        - type
+        - name
+        - version
+        - sha256
+        - size_bytes
+        - content_type
+        - created_at
+      properties:
+        id:
+          type: string
+          format: uuid
+          example: "550e8400-e29b-41d4-a716-446655440000"
+        type:
+          type: string
+          example: model
+        name:
+          type: string
+          example: fraud-detector
+        version:
+          type: string
+          pattern: "^v[0-9]+\\.[0-9]+\\.[0-9]+$"
+          example: "v1.2.3"
+        sha256:
+          type: string
+          pattern: "^[0-9a-f]{64}$"
+          example: "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+        size_bytes:
+          type: integer
+          format: int64
+          minimum: 0
+          example: 104857600
+        content_type:
+          type: string
+          example: "application/octet-stream"
+        metadata:
+          type: object
+          additionalProperties:
+            type: string
+          description: Arbitrary string key-value pairs supplied at upload time.
+        created_at:
+          type: string
+          format: date-time
+
+    ArtifactWithDownload:
+      allOf:
+        - $ref: "#/components/schemas/Artifact"
+        - type: object
+          required:
+            - download_url
+          properties:
+            download_url:
+              type: string
+              format: uri
+              example: "http://localhost:8080/v1/artifacts/model/fraud-detector/v1.2.3/download"
+
+    ChannelPointer:
+      type: object
+      required:
+        - channel
+        - type
+        - name
+        - version
+        - artifact_id
+        - promoted_at
+      properties:
+        channel:
+          type: string
+          example: stable
+        type:
+          type: string
+          example: model
+        name:
+          type: string
+          example: fraud-detector
+        version:
+          type: string
+          pattern: "^v[0-9]+\\.[0-9]+\\.[0-9]+$"
+          example: "v1.2.3"
+        artifact_id:
+          type: string
+          format: uuid
+        previous_version:
+          type: string
+          pattern: "^v[0-9]+\\.[0-9]+\\.[0-9]+$"
+          description: Absent when no prior promotion exists.
+          example: "v1.2.2"
+        promoted_at:
+          type: string
+          format: date-time
+        promoted_by:
+          type: string
+          description: Value of the X-Promoted-By request header, if provided.
+          example: "ci-pipeline"
+
+    HealthResponse:
+      type: object
+      required:
+        - status
+        - service
+        - version
+      properties:
+        status:
+          type: string
+          enum: [ok]
+        service:
+          type: string
+          example: artifact-registry-service
+        version:
+          type: string
+          example: "v0.1.0"
+
+    # ── Error envelope ────────────────────────────────────────────────────────
+    Error:
+      type: object
+      required:
+        - error
+      properties:
+        error:
+          type: string
+
+  # ── Reusable responses ─────────────────────────────────────────────────────
+  responses:
+    Unauthenticated:
+      description: Missing or invalid API key.
+      content:
+        application/json:
+          schema:
+            $ref: "#/components/schemas/Error"
+          example:
+            error: "missing or invalid API key"
+
+    Forbidden:
+      description: >
+        Valid key but insufficient scope. The required scope is named in the
+        error message.
+      content:
+        application/json:
+          schema:
+            $ref: "#/components/schemas/Error"
+          examples:
+            read_required:
+              value:
+                error: "insufficient scope — required: read"
+            write_required:
+              value:
+                error: "insufficient scope — required: write"
+            admin_required:
+              value:
+                error: "insufficient scope — required: admin"
+
+    NotFound:
+      description: The requested resource does not exist.
+      content:
+        application/json:
+          schema:
+            $ref: "#/components/schemas/Error"
+
+    ValidationError:
+      description: Request body or parameters failed validation.
+      content:
+        application/json:
+          schema:
+            $ref: "#/components/schemas/Error"
+
+    Conflict:
+      description: >
+        State conflict — artifact version already exists, or no prior
+        channel state to roll back to.
+      content:
+        application/json:
+          schema:
+            $ref: "#/components/schemas/Error"
+
+  # ── Reusable parameters ────────────────────────────────────────────────────
+  parameters:
+    ArtifactType:
+      name: type
+      in: path
+      required: true
+      schema:
+        type: string
+      description: Artifact type (e.g. model, config, binary, rules).
+      example: model
+
+    ArtifactName:
+      name: name
+      in: path
+      required: true
+      schema:
+        type: string
+      example: fraud-detector
+
+    ArtifactVersion:
+      name: version
+      in: path
+      required: true
+      schema:
+        type: string
+        pattern: "^v[0-9]+\\.[0-9]+\\.[0-9]+$"
+      example: "v1.2.3"
+
+    ChannelName:
+      name: channel
+      in: path
+      required: true
+      schema:
+        type: string
+      description: Distribution channel name (e.g. stable, canary).
+      example: stable
+
+    PromotedBy:
+      name: X-Promoted-By
+      in: header
+      required: false
+      schema:
+        type: string
+      description: >
+        Identity of the caller performing the promotion or rollback (CI job
+        name, user handle, etc.). Stored verbatim in channel history.
+      example: "ci-pipeline"
+
+# ── Paths ──────────────────────────────────────────────────────────────────────
+
+paths:
+  /health:
+    get:
+      operationId: getHealth
+      summary: Health check
+      description: Returns service liveness. No authentication required.
+      security: []   # explicitly unauthenticated
+      tags: [meta]
+      responses:
+        "200":
+          description: Service is running.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/HealthResponse"
+              example:
+                status: ok
+                service: artifact-registry-service
+                version: "v0.1.0"
+
+  # ── Artifact endpoints ─────────────────────────────────────────────────────
+
+  /artifacts/{type}/{name}/:
+    post:
+      operationId: uploadArtifact
+      summary: Upload a new artifact version
+      description: >
+        Streams the file to storage while computing a SHA-256 digest.
+        Version must be a semantic version string (v-prefixed).
+        A version is immutable once uploaded — re-uploading the same
+        type/name/version returns 409.
+      tags: [artifacts]
+      x-required-scope: write
+      parameters:
+        - $ref: "#/components/parameters/ArtifactType"
+        - $ref: "#/components/parameters/ArtifactName"
+      requestBody:
+        required: true
+        content:
+          multipart/form-data:
+            schema:
+              type: object
+              required:
+                - version
+                - file
+              properties:
+                version:
+                  type: string
+                  pattern: "^v[0-9]+\\.[0-9]+\\.[0-9]+$"
+                  description: Semantic version string for this artifact.
+                  example: "v1.2.3"
+                file:
+                  type: string
+                  format: binary
+                  description: >
+                    The artifact file. Maximum size is controlled by
+                    MAX_UPLOAD_MB (default 500 MB).
+                metadata:
+                  type: string
+                  description: >
+                    JSON-encoded object of string key-value pairs.
+                    Example: `{"git_sha":"abc123","built_by":"ci"}`
+      responses:
+        "201":
+          description: Artifact uploaded successfully.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Artifact"
+        "400":
+          $ref: "#/components/responses/ValidationError"
+        "401":
+          $ref: "#/components/responses/Unauthenticated"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "409":
+          $ref: "#/components/responses/Conflict"
+
+  /artifacts/{type}/{name}/versions:
+    get:
+      operationId: listArtifactVersions
+      summary: List all versions of an artifact
+      description: >
+        Returns every uploaded version in insertion order. Returns an empty
+        array (not 404) when no versions exist for the given type/name.
+      tags: [artifacts]
+      x-required-scope: read
+      parameters:
+        - $ref: "#/components/parameters/ArtifactType"
+        - $ref: "#/components/parameters/ArtifactName"
+      responses:
+        "200":
+          description: Array of artifact versions (may be empty).
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  $ref: "#/components/schemas/Artifact"
+        "401":
+          $ref: "#/components/responses/Unauthenticated"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+
+  /artifacts/{type}/{name}/latest:
+    get:
+      operationId: resolveLatestArtifact
+      summary: Resolve the latest promoted version for a channel
+      description: >
+        Returns the artifact currently promoted to the given channel, along
+        with a pre-computed download_url. Defaults to the `stable` channel
+        when the query parameter is omitted.
+      tags: [artifacts]
+      x-required-scope: read
+      parameters:
+        - $ref: "#/components/parameters/ArtifactType"
+        - $ref: "#/components/parameters/ArtifactName"
+        - name: channel
+          in: query
+          required: false
+          schema:
+            type: string
+            default: stable
+          description: Channel to resolve. Defaults to `stable`.
+          example: canary
+      responses:
+        "200":
+          description: The currently promoted artifact for this channel.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ArtifactWithDownload"
+        "401":
+          $ref: "#/components/responses/Unauthenticated"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "404":
+          description: No version has been promoted to this channel yet.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+              example:
+                error: 'no version promoted to channel "stable"'
+
+  /artifacts/{type}/{name}/{version}:
+    get:
+      operationId: getArtifactVersion
+      summary: Get metadata for a specific artifact version
+      tags: [artifacts]
+      x-required-scope: read
+      parameters:
+        - $ref: "#/components/parameters/ArtifactType"
+        - $ref: "#/components/parameters/ArtifactName"
+        - $ref: "#/components/parameters/ArtifactVersion"
+      responses:
+        "200":
+          description: Artifact metadata including download_url.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ArtifactWithDownload"
+        "401":
+          $ref: "#/components/responses/Unauthenticated"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "404":
+          $ref: "#/components/responses/NotFound"
+
+  /artifacts/{type}/{name}/{version}/download:
+    get:
+      operationId: downloadArtifact
+      summary: Download artifact binary
+      description: >
+        **Local backend**: streams the file directly. Response headers include
+        `Content-Type` (from upload), `X-Artifact-SHA256`, and
+        `X-Artifact-Version`.
+
+        **S3 backend**: returns HTTP 307 to a short-lived signed URL (15 min).
+        Clients must follow redirects.
+      tags: [artifacts]
+      x-required-scope: read
+      parameters:
+        - $ref: "#/components/parameters/ArtifactType"
+        - $ref: "#/components/parameters/ArtifactName"
+        - $ref: "#/components/parameters/ArtifactVersion"
+      responses:
+        "200":
+          description: Artifact file (local backend only).
+          headers:
+            Content-Type:
+              schema:
+                type: string
+              description: MIME type recorded at upload time.
+            X-Artifact-SHA256:
+              schema:
+                type: string
+                pattern: "^[0-9a-f]{64}$"
+              description: Hex-encoded SHA-256 digest of the file.
+            X-Artifact-Version:
+              schema:
+                type: string
+              description: Artifact version string.
+          content:
+            application/octet-stream:
+              schema:
+                type: string
+                format: binary
+        "307":
+          description: Redirect to signed URL (S3 backend only). Follow the Location header.
+          headers:
+            Location:
+              schema:
+                type: string
+                format: uri
+              description: Signed download URL, valid for 15 minutes.
+        "401":
+          $ref: "#/components/responses/Unauthenticated"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "404":
+          $ref: "#/components/responses/NotFound"
+
+  # ── Channel endpoints ──────────────────────────────────────────────────────
+
+  /channels/{channel}/promote/{type}/{name}/{version}:
+    post:
+      operationId: promoteArtifact
+      summary: Promote an artifact version to a channel
+      description: >
+        Sets the channel pointer to the given version. The previous version,
+        if any, is stored in `previous_version` and becomes the rollback
+        target. The artifact must already exist (uploaded) before promotion.
+      tags: [channels]
+      x-required-scope: admin
+      parameters:
+        - $ref: "#/components/parameters/ChannelName"
+        - $ref: "#/components/parameters/ArtifactType"
+        - $ref: "#/components/parameters/ArtifactName"
+        - $ref: "#/components/parameters/ArtifactVersion"
+        - $ref: "#/components/parameters/PromotedBy"
+      responses:
+        "200":
+          description: Updated channel state after promotion.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ChannelPointer"
+        "400":
+          $ref: "#/components/responses/ValidationError"
+        "401":
+          $ref: "#/components/responses/Unauthenticated"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "404":
+          description: Artifact version does not exist.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+
+  /channels/{channel}/rollback/{type}/{name}:
+    post:
+      operationId: rollbackChannel
+      summary: Roll a channel back to its previous version
+      description: >
+        Swaps the current version with `previous_version`. Only one level of
+        rollback is maintained — rolling back twice returns to the original
+        version, not two steps back. Returns 409 if no prior promotion exists.
+      tags: [channels]
+      x-required-scope: admin
+      parameters:
+        - $ref: "#/components/parameters/ChannelName"
+        - $ref: "#/components/parameters/ArtifactType"
+        - $ref: "#/components/parameters/ArtifactName"
+        - $ref: "#/components/parameters/PromotedBy"
+      responses:
+        "200":
+          description: Updated channel state after rollback.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ChannelPointer"
+        "401":
+          $ref: "#/components/responses/Unauthenticated"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "404":
+          $ref: "#/components/responses/NotFound"
+        "409":
+          description: No prior channel state exists to roll back to.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+              example:
+                error: "no channel history to roll back to"
+
+  /channels/{channel}/state/{type}/{name}:
+    get:
+      operationId: getChannelState
+      summary: Get current channel state for an artifact
+      tags: [channels]
+      x-required-scope: read
+      parameters:
+        - $ref: "#/components/parameters/ChannelName"
+        - $ref: "#/components/parameters/ArtifactType"
+        - $ref: "#/components/parameters/ArtifactName"
+      responses:
+        "200":
+          description: Current channel pointer.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ChannelPointer"
+        "401":
+          $ref: "#/components/responses/Unauthenticated"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "404":
+          description: No version has been promoted to this channel.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+
+  /channels/{channel}/history/{type}/{name}:
+    get:
+      operationId: getChannelHistory
+      summary: Get full promotion history for a channel/artifact pair
+      description: >
+        Returns all channel pointer records in reverse chronological order
+        (most recent first). Returns an empty array when no promotions exist.
+      tags: [channels]
+      x-required-scope: read
+      parameters:
+        - $ref: "#/components/parameters/ChannelName"
+        - $ref: "#/components/parameters/ArtifactType"
+        - $ref: "#/components/parameters/ArtifactName"
+      responses:
+        "200":
+          description: Channel history (may be empty).
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  $ref: "#/components/schemas/ChannelPointer"
+        "401":
+          $ref: "#/components/responses/Unauthenticated"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+
+tags:
+  - name: meta
+    description: Service liveness and metadata.
+  - name: artifacts
+    description: Upload and retrieve immutable artifact versions.
+  - name: channels
+    description: >
+      Mutable channel pointers — promote and roll back versions across
+      named distribution channels.

@@ -53,8 +53,7 @@ func extractBearer(r *http.Request) string {
 	if after, ok := strings.CutPrefix(h, "Bearer "); ok {
 		return strings.TrimSpace(after)
 	}
-	// Also accept ?api_key=... query param for edge devices / curl convenience
-	return r.URL.Query().Get("api_key")
+	return ""
 }
 
 type responseWriter struct {
