@@ -3,7 +3,10 @@ package api
 import (
 	"log/slog"
 	"net/http"
+	"strings"
 	"time"
+
+	"github.com/danharper32/artifact-registry-service/internal/auth"
 )
 
 func requestLogger(log *slog.Logger) func(http.Handler) http.Handler {
@@ -20,6 +23,38 @@ func requestLogger(log *slog.Logger) func(http.Handler) http.Handler {
 			)
 		})
 	}
+}
+
+// requireScope returns a middleware that enforces the given scope.
+// Extracts the bearer token from Authorization: Bearer <key>.
+func requireScope(store *auth.Store, scope string) func(http.Handler) http.Handler {
+	return func(next http.Handler) http.Handler {
+		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			key := extractBearer(r)
+			if !store.Allowed(key, scope) {
+				if store.Enabled() && !store.Authenticated(key) {
+					writeJSON(w, http.StatusUnauthorized, map[string]string{
+						"error": "missing or invalid API key",
+					})
+					return
+				}
+				writeJSON(w, http.StatusForbidden, map[string]string{
+					"error": "insufficient scope — required: " + scope,
+				})
+				return
+			}
+			next.ServeHTTP(w, r)
+		})
+	}
+}
+
+func extractBearer(r *http.Request) string {
+	h := r.Header.Get("Authorization")
+	if after, ok := strings.CutPrefix(h, "Bearer "); ok {
+		return strings.TrimSpace(after)
+	}
+	// Also accept ?api_key=... query param for edge devices / curl convenience
+	return r.URL.Query().Get("api_key")
 }
 
 type responseWriter struct {

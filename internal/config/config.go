@@ -3,6 +3,9 @@ package config
 import (
 	"os"
 	"strconv"
+	"strings"
+
+	"github.com/danharper32/artifact-registry-service/internal/auth"
 )
 
 type Config struct {
@@ -11,6 +14,7 @@ type Config struct {
 	DatabasePath string
 	MaxUploadMB  int64
 	BaseURL      string
+	Auth         *auth.Store
 }
 
 func Load() *Config {
@@ -28,13 +32,45 @@ func Load() *Config {
 		}
 	}
 
+	authDisabled := strings.EqualFold(getEnv("ARS_AUTH_DISABLED", "false"), "true")
+
 	return &Config{
 		Port:         port,
 		StorageDir:   getEnv("STORAGE_DIR", "./data/artifacts"),
 		DatabasePath: getEnv("DATABASE_PATH", "./data/registry.db"),
 		MaxUploadMB:  maxUploadMB,
 		BaseURL:      getEnv("BASE_URL", "http://localhost:8080"),
+		Auth:         auth.NewStore(loadKeys(), !authDisabled),
 	}
+}
+
+// loadKeys builds the key list from environment variables.
+//
+//	ARS_ADMIN_KEYS=key1,key2   — read + write + admin
+//	ARS_WRITE_KEYS=key3        — read + write
+//	ARS_READ_KEYS=key4,key5    — read only
+func loadKeys() []auth.KeyEntry {
+	var entries []auth.KeyEntry
+	for _, raw := range splitKeys(os.Getenv("ARS_ADMIN_KEYS")) {
+		entries = append(entries, auth.KeyEntry{Key: raw, Scopes: []string{auth.ScopeAdmin, auth.ScopeWrite, auth.ScopeRead}})
+	}
+	for _, raw := range splitKeys(os.Getenv("ARS_WRITE_KEYS")) {
+		entries = append(entries, auth.KeyEntry{Key: raw, Scopes: []string{auth.ScopeWrite, auth.ScopeRead}})
+	}
+	for _, raw := range splitKeys(os.Getenv("ARS_READ_KEYS")) {
+		entries = append(entries, auth.KeyEntry{Key: raw, Scopes: []string{auth.ScopeRead}})
+	}
+	return entries
+}
+
+func splitKeys(s string) []string {
+	var out []string
+	for _, k := range strings.Split(s, ",") {
+		if k = strings.TrimSpace(k); k != "" {
+			out = append(out, k)
+		}
+	}
+	return out
 }
 
 func getEnv(key, def string) string {
