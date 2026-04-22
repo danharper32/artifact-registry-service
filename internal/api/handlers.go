@@ -89,7 +89,8 @@ func (h *Handler) Upload(w http.ResponseWriter, r *http.Request) {
 		}
 		return
 	}
-	h.wh.Emit(webhooks.EventArtifactUploaded, webhooks.ArtifactUploadedData{
+	// aggregate_key = artifact_id so consumers can reconcile without ordering.
+	h.wh.Emit(webhooks.EventArtifactUploaded, artifact.ID, webhooks.ArtifactUploadedData{
 		ArtifactID: artifact.ID,
 		Version:    artifact.Version,
 		SHA256:     artifact.SHA256,
@@ -220,8 +221,10 @@ func (h *Handler) Promote(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusInternalServerError, err.Error())
 		return
 	}
-	h.wh.Emit(webhooks.EventChannelPromoted, webhooks.ChannelEventData{
-		Channel:     ch.Channel,
+	// aggregate_key = channel name so consumers can reconcile per-channel state.
+	h.wh.Emit(webhooks.EventChannelPromoted, ch.Channel, webhooks.ChannelEventData{
+		Channel: ch.Channel,
+		// from_version = version left behind; to_version = version now active.
 		FromVersion: ch.PreviousVersion,
 		ToVersion:   ch.Version,
 	})
@@ -249,7 +252,15 @@ func (h *Handler) Rollback(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusInternalServerError, err.Error())
 		return
 	}
-	h.wh.Emit(webhooks.EventChannelRollback, webhooks.ChannelEventData{
+	// Rollback semantics (explicit):
+	//   from_version = ch.PreviousVersion = version the channel held before rollback
+	//   to_version   = ch.Version         = version the channel holds after rollback
+	//
+	// Rollback delegates to Promote internally. The returned ChannelPointer has:
+	//   Version         = the old version being restored (rolled back TO)
+	//   PreviousVersion = the version that was active just before rollback (rolled back FROM)
+	// These field mappings are verified in TestRollbackEventSemantics.
+	h.wh.Emit(webhooks.EventChannelRollback, ch.Channel, webhooks.ChannelEventData{
 		Channel:     ch.Channel,
 		FromVersion: ch.PreviousVersion,
 		ToVersion:   ch.Version,
@@ -299,6 +310,31 @@ func (h *Handler) Health(w http.ResponseWriter, r *http.Request) {
 		"status":  "ok",
 		"service": "artifact-registry-service",
 		"version": "v0.1.0",
+	})
+}
+
+// ── Admin: webhook replay ─────────────────────────────────────────────────────
+
+// ReplayWebhook re-dispatches a dead_letter webhook delivery using its original
+// payload and signature. Only dead_letter items can be replayed; all other states
+// return 409. Requires admin scope.
+func (h *Handler) ReplayWebhook(w http.ResponseWriter, r *http.Request) {
+	deliveryID := chi.URLParam(r, "delivery_id")
+	if err := h.wh.Replay(r.Context(), deliveryID); err != nil {
+		switch {
+		case errors.Is(err, webhooks.ErrDeliveryNotFound):
+			writeError(w, http.StatusNotFound, "webhook delivery not found")
+		case errors.Is(err, webhooks.ErrNotDeadLetter):
+			writeError(w, http.StatusConflict, err.Error())
+		default:
+			h.log.Error("webhook replay failed", "delivery_id", deliveryID, "err", err)
+			writeError(w, http.StatusInternalServerError, "replay failed")
+		}
+		return
+	}
+	writeJSON(w, http.StatusAccepted, map[string]string{
+		"delivery_id": deliveryID,
+		"status":      "replaying",
 	})
 }
 

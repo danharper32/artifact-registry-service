@@ -37,7 +37,8 @@ func main() {
 	defer repo.Close()
 
 	svc := service.New(repo, stor, log)
-	wh := webhooks.NewDispatcher(cfg.WebhookURLs, cfg.WebhookSecret, log)
+	// repo implements webhooks.DeliveryStore; pass it for durable DLQ support.
+	wh := webhooks.NewDispatcher(cfg.WebhookURLs, cfg.WebhookSecret, log, repo)
 	router := api.NewRouter(svc, stor, log, cfg, wh)
 
 	srv := &http.Server{

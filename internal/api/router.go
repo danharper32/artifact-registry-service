@@ -46,6 +46,11 @@ func NewRouter(svc *service.Registry, stor storage.Backend, log *slog.Logger, cf
 			r.With(readOnly).Get("/state/{type}/{name}", h.GetChannelState)
 			r.With(readOnly).Get("/history/{type}/{name}", h.GetChannelHistory)
 		})
+
+		// Admin endpoints — require admin scope.
+		r.Route("/admin", func(r chi.Router) {
+			r.With(adminOnly).Post("/webhooks/{delivery_id}/replay", h.ReplayWebhook)
+		})
 	})
 
 	return r

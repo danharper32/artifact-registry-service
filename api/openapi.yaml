@@ -8,6 +8,61 @@ info:
     Artifacts are immutable once uploaded. Channels (stable, canary, …) are
     mutable pointers to a specific version and support single-step rollback.
 
+    ## Webhook events
+
+    State-changing operations emit webhook events to all configured `WEBHOOK_URLS`.
+
+    ### Event envelope
+
+    ```json
+    {
+      "event_id":      "<uuidv4>",
+      "event_type":    "artifact.uploaded | channel.promoted | channel.rollback",
+      "timestamp":     "<RFC3339 UTC>",
+      "aggregate_key": "<artifact_id or channel name>",
+      "data":          { ... },
+      "signature":     "<hex HMAC-SHA256>"
+    }
+    ```
+
+    ### Signature verification
+
+    The signature covers the envelope with `"signature":""`. To verify:
+    1. Parse the received JSON.
+    2. Set `signature` to `""`.
+    3. Re-marshal (field order is deterministic — struct order).
+    4. Compute `HMAC-SHA256(secret, remarshaled_bytes)`.
+    5. Compare hex result to the `X-Signature` request header.
+
+    ### Ordering guarantee: **NONE**
+
+    Webhook delivery is **asynchronous**. Delivery order is **not guaranteed**.
+    Two events for the same entity may arrive out of order at the consumer.
+
+    Consumers **MUST** treat webhook events as notifications, not as
+    authoritative ordered state transitions. When ordering matters, consumers
+    **MUST** reconcile against the REST API (e.g. `GET /v1/channels/{channel}/state/{type}/{name}`).
+
+    The `aggregate_key` field in every event identifies the affected entity:
+    - `artifact.uploaded` → `artifact_id`
+    - `channel.promoted` / `channel.rollback` → channel name
+
+    ### Rollback semantics
+
+    For `channel.rollback`:
+    - `from_version` = version the channel held **immediately before** rollback
+    - `to_version`   = version the channel holds **immediately after** rollback
+
+    This is identical in structure to `channel.promoted` (`from` = what was
+    displaced, `to` = what is now active), but the event_type distinguishes intent.
+
+    ### Dead-letter queue and replay
+
+    Failed deliveries are retried up to 5 times with exponential backoff
+    (0 s / 1 s / 5 s / 30 s / 2 min). After exhaustion the delivery is
+    persisted as `dead_letter` in the service database. Admin users can
+    replay dead-lettered deliveries via `POST /v1/admin/webhooks/{delivery_id}/replay`.
+
 servers:
   - url: "{baseURL}/v1"
     variables:
@@ -616,6 +671,68 @@ paths:
         "403":
           $ref: "#/components/responses/Forbidden"
 
+  # ── Admin endpoints ───────────────────────────────────────────────────────
+
+  /admin/webhooks/{delivery_id}/replay:
+    post:
+      operationId: replayWebhookDelivery
+      summary: Replay a dead-lettered webhook delivery
+      description: >
+        Re-dispatches a single dead_letter webhook delivery using its original
+        payload and HMAC signature verbatim. Only deliveries in `dead_letter`
+        state can be replayed — any other state returns 409.
+
+        Replay is asynchronous; this endpoint returns 202 immediately. The
+        delivery record is transitioned to `pending` before the goroutine
+        is launched; final status (`delivered` or `dead_letter`) is written
+        after the retry loop completes.
+
+        Requires **admin** scope.
+      tags: [admin]
+      x-required-scope: admin
+      parameters:
+        - name: delivery_id
+          in: path
+          required: true
+          schema:
+            type: string
+            format: uuid
+          description: UUID of the webhook delivery record to replay.
+      responses:
+        "202":
+          description: Replay dispatched. Delivery happens asynchronously.
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [delivery_id, status]
+                properties:
+                  delivery_id:
+                    type: string
+                    format: uuid
+                  status:
+                    type: string
+                    enum: [replaying]
+        "401":
+          $ref: "#/components/responses/Unauthenticated"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "404":
+          description: delivery_id not found.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+        "409":
+          description: >
+            Delivery is not in dead_letter state and cannot be replayed.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+              example:
+                error: "delivery is not in dead_letter state and cannot be replayed"
+
 tags:
   - name: meta
     description: Service liveness and metadata.
@@ -625,3 +742,7 @@ tags:
     description: >
       Mutable channel pointers — promote and roll back versions across
       named distribution channels.
+  - name: admin
+    description: >
+      Administrative operations requiring admin scope. Currently: webhook
+      dead-letter queue replay.

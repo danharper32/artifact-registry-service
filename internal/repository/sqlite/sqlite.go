@@ -71,6 +71,10 @@ func New(path string) (*SQLite, error) {
 		db.Close()
 		return nil, fmt.Errorf("apply schema: %w", err)
 	}
+	if err := applyWebhookSchema(db); err != nil {
+		db.Close()
+		return nil, fmt.Errorf("apply webhook schema: %w", err)
+	}
 	return &SQLite{db: db}, nil
 }
 
