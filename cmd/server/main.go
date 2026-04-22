@@ -14,7 +14,7 @@ import (
 	"github.com/danharper32/artifact-registry-service/internal/config"
 	"github.com/danharper32/artifact-registry-service/internal/repository/sqlite"
 	"github.com/danharper32/artifact-registry-service/internal/service"
-	"github.com/danharper32/artifact-registry-service/internal/storage/local"
+	"github.com/danharper32/artifact-registry-service/internal/storage"
 	"github.com/danharper32/artifact-registry-service/internal/webhooks"
 )
 
@@ -23,7 +23,7 @@ func main() {
 
 	cfg := config.Load()
 
-	stor, err := local.New(cfg.StorageDir)
+	stor, err := storage.NewBackend(cfg)
 	if err != nil {
 		log.Error("init storage", "err", err)
 		os.Exit(1)

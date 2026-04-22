@@ -8,15 +8,29 @@ import (
 	"github.com/danharper32/artifact-registry-service/internal/auth"
 )
 
+// S3Config holds connection parameters for S3-compatible object storage.
+type S3Config struct {
+	Endpoint        string
+	Region          string
+	Bucket          string
+	AccessKeyID     string
+	SecretAccessKey string
+	UseSSL          bool
+	ForcePathStyle  bool
+	Prefix          string
+}
+
 type Config struct {
-	Port         int
-	StorageDir   string
-	DatabasePath string
-	MaxUploadMB  int64
-	BaseURL      string
-	Auth         *auth.Store
-	WebhookURLs  []string
-	WebhookSecret string
+	Port           int
+	StorageDir     string
+	StorageBackend string // "local" (default) or "s3"
+	DatabasePath   string
+	MaxUploadMB    int64
+	BaseURL        string
+	Auth           *auth.Store
+	WebhookURLs    []string
+	WebhookSecret  string
+	S3             S3Config
 }
 
 func Load() *Config {
@@ -37,14 +51,25 @@ func Load() *Config {
 	authDisabled := strings.EqualFold(getEnv("ARS_AUTH_DISABLED", "false"), "true")
 
 	return &Config{
-		Port:          port,
-		StorageDir:    getEnv("STORAGE_DIR", "./data/artifacts"),
-		DatabasePath:  getEnv("DATABASE_PATH", "./data/registry.db"),
-		MaxUploadMB:   maxUploadMB,
-		BaseURL:       getEnv("BASE_URL", "http://localhost:8080"),
-		Auth:          auth.NewStore(loadKeys(), !authDisabled),
-		WebhookURLs:   splitKeys(os.Getenv("WEBHOOK_URLS")),
-		WebhookSecret: os.Getenv("WEBHOOK_SECRET"),
+		Port:           port,
+		StorageDir:     getEnv("STORAGE_DIR", "./data/artifacts"),
+		StorageBackend: strings.ToLower(getEnv("STORAGE_BACKEND", "local")),
+		DatabasePath:   getEnv("DATABASE_PATH", "./data/registry.db"),
+		MaxUploadMB:    maxUploadMB,
+		BaseURL:        getEnv("BASE_URL", "http://localhost:8080"),
+		Auth:           auth.NewStore(loadKeys(), !authDisabled),
+		WebhookURLs:    splitKeys(os.Getenv("WEBHOOK_URLS")),
+		WebhookSecret:  os.Getenv("WEBHOOK_SECRET"),
+		S3: S3Config{
+			Endpoint:        os.Getenv("S3_ENDPOINT"),
+			Region:          getEnv("S3_REGION", "us-east-1"),
+			Bucket:          os.Getenv("S3_BUCKET"),
+			AccessKeyID:     os.Getenv("S3_ACCESS_KEY_ID"),
+			SecretAccessKey: os.Getenv("S3_SECRET_ACCESS_KEY"),
+			UseSSL:          !strings.EqualFold(getEnv("S3_USE_SSL", "true"), "false"),
+			ForcePathStyle:  strings.EqualFold(getEnv("S3_FORCE_PATH_STYLE", "false"), "true"),
+			Prefix:          os.Getenv("S3_PREFIX"),
+		},
 	}
 }
 
