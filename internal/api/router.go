@@ -11,10 +11,11 @@ import (
 	"github.com/danharper32/artifact-registry-service/internal/config"
 	"github.com/danharper32/artifact-registry-service/internal/service"
 	"github.com/danharper32/artifact-registry-service/internal/storage"
+	"github.com/danharper32/artifact-registry-service/internal/webhooks"
 )
 
-func NewRouter(svc *service.Registry, stor storage.Backend, log *slog.Logger, cfg *config.Config) http.Handler {
-	h := &Handler{svc: svc, stor: stor, log: log, cfg: cfg}
+func NewRouter(svc *service.Registry, stor storage.Backend, log *slog.Logger, cfg *config.Config, wh *webhooks.Dispatcher) http.Handler {
+	h := &Handler{svc: svc, stor: stor, log: log, cfg: cfg, wh: wh}
 	store := cfg.Auth
 
 	readOnly  := requireScope(store, auth.ScopeRead)

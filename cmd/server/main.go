@@ -15,6 +15,7 @@ import (
 	"github.com/danharper32/artifact-registry-service/internal/repository/sqlite"
 	"github.com/danharper32/artifact-registry-service/internal/service"
 	"github.com/danharper32/artifact-registry-service/internal/storage/local"
+	"github.com/danharper32/artifact-registry-service/internal/webhooks"
 )
 
 func main() {
@@ -36,7 +37,8 @@ func main() {
 	defer repo.Close()
 
 	svc := service.New(repo, stor, log)
-	router := api.NewRouter(svc, stor, log, cfg)
+	wh := webhooks.NewDispatcher(cfg.WebhookURLs, cfg.WebhookSecret, log)
+	router := api.NewRouter(svc, stor, log, cfg, wh)
 
 	srv := &http.Server{
 		Addr:         fmt.Sprintf(":%d", cfg.Port),

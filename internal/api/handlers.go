@@ -15,6 +15,7 @@ import (
 	"github.com/danharper32/artifact-registry-service/internal/domain"
 	"github.com/danharper32/artifact-registry-service/internal/service"
 	"github.com/danharper32/artifact-registry-service/internal/storage"
+	"github.com/danharper32/artifact-registry-service/internal/webhooks"
 )
 
 type Handler struct {
@@ -22,6 +23,7 @@ type Handler struct {
 	stor storage.Backend
 	log  *slog.Logger
 	cfg  *config.Config
+	wh   *webhooks.Dispatcher
 }
 
 // ── Upload ────────────────────────────────────────────────────────────────────
@@ -87,6 +89,12 @@ func (h *Handler) Upload(w http.ResponseWriter, r *http.Request) {
 		}
 		return
 	}
+	h.wh.Emit(webhooks.EventArtifactUploaded, webhooks.ArtifactUploadedData{
+		ArtifactID: artifact.ID,
+		Version:    artifact.Version,
+		SHA256:     artifact.SHA256,
+		SizeBytes:  artifact.SizeBytes,
+	})
 	writeJSON(w, http.StatusCreated, artifact)
 }
 
@@ -212,6 +220,11 @@ func (h *Handler) Promote(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusInternalServerError, err.Error())
 		return
 	}
+	h.wh.Emit(webhooks.EventChannelPromoted, webhooks.ChannelEventData{
+		Channel:     ch.Channel,
+		FromVersion: ch.PreviousVersion,
+		ToVersion:   ch.Version,
+	})
 	writeJSON(w, http.StatusOK, ch)
 }
 
@@ -236,6 +249,11 @@ func (h *Handler) Rollback(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusInternalServerError, err.Error())
 		return
 	}
+	h.wh.Emit(webhooks.EventChannelRollback, webhooks.ChannelEventData{
+		Channel:     ch.Channel,
+		FromVersion: ch.PreviousVersion,
+		ToVersion:   ch.Version,
+	})
 	writeJSON(w, http.StatusOK, ch)
 }
 

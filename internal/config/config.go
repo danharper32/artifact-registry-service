@@ -15,6 +15,8 @@ type Config struct {
 	MaxUploadMB  int64
 	BaseURL      string
 	Auth         *auth.Store
+	WebhookURLs  []string
+	WebhookSecret string
 }
 
 func Load() *Config {
@@ -35,12 +37,14 @@ func Load() *Config {
 	authDisabled := strings.EqualFold(getEnv("ARS_AUTH_DISABLED", "false"), "true")
 
 	return &Config{
-		Port:         port,
-		StorageDir:   getEnv("STORAGE_DIR", "./data/artifacts"),
-		DatabasePath: getEnv("DATABASE_PATH", "./data/registry.db"),
-		MaxUploadMB:  maxUploadMB,
-		BaseURL:      getEnv("BASE_URL", "http://localhost:8080"),
-		Auth:         auth.NewStore(loadKeys(), !authDisabled),
+		Port:          port,
+		StorageDir:    getEnv("STORAGE_DIR", "./data/artifacts"),
+		DatabasePath:  getEnv("DATABASE_PATH", "./data/registry.db"),
+		MaxUploadMB:   maxUploadMB,
+		BaseURL:       getEnv("BASE_URL", "http://localhost:8080"),
+		Auth:          auth.NewStore(loadKeys(), !authDisabled),
+		WebhookURLs:   splitKeys(os.Getenv("WEBHOOK_URLS")),
+		WebhookSecret: os.Getenv("WEBHOOK_SECRET"),
 	}
 }
 
